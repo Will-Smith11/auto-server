@@ -1,6 +1,4 @@
 mod distrib;
-mod types;
-
 use proc_macro::TokenStream;
 
 /// the server macro has two main attributes that needed to be specified within
