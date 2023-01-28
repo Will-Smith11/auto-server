@@ -1,9 +1,8 @@
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{
-    parse::{Parse, ParseStream, Parser},
-    punctuated::Punctuated,
-    Attribute, Ident, ItemEnum, Meta, MetaList, NestedMeta, Path,
+    parse::{Parse, ParseStream},
+    Fields, Ident, ItemEnum, Meta, NestedMeta, Path,
 };
 
 pub fn get_name(parsed_attrs: &Vec<Meta>, side: String) -> Option<Ident>
@@ -54,6 +53,11 @@ pub fn remove_attr(parsed_attrs: &Vec<Meta>, attr_path: String) -> Vec<&Meta>
         .collect()
 }
 
+pub fn make_set(i: &Ident) -> Ident
+{
+    Ident::new(&format!("set_{}", i), Span::call_site())
+}
+
 pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStream
 {
     let parsed_attrs: Vec<Meta> = server_enum
@@ -75,11 +79,11 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
     let server_enum_name = &server_enum.ident;
     let client_enum_name = &client_enum.ident;
 
-    let remove_attr = remove_attr(&parsed_attrs, "server".to_string());
     let mut custom = server_enum.clone();
     custom.attrs.clear();
 
     quote! {
+
         type PendingFuture = Pin<Box<dyn Future<Output = Result<WebSocketStream<TcpStream>, Error>>>>;
 
         #[pin_project::pin_project]
@@ -106,6 +110,11 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
                     incoming_buffer: VecDeque::new(),
                     ids: 0,
                 }
+            }
+
+            pub fn send(&mut self, id: u64, msg: #server_enum_name)
+            {
+                self.outgoing_buffers.entry(id).or_default().push_back(msg);
             }
         }
 
@@ -237,13 +246,87 @@ pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStre
     {
         panic!("failed to parse name");
     }
+
     let name = name.unwrap();
     let client_generics = &client_enum.generics;
+    let client_enum_name = &client_enum.ident;
+    let server_enum_name = &server_enum.ident;
     let mut custom = client_enum.clone();
     custom.attrs.clear();
     quote! {
 
-        pub struct #name #client_generics { }
+        pub struct #name #client_generics {
+
+            stream:          WebSocketStream<MaybeTlsStream<TcpStream>>,
+            ping_interval:   Interval,
+            poll_state: PollState,
+            outgoing_buffer: VecDeque<#client_enum_name>,
+        }
+
+        impl #client_generics #name #client_generics {
+            pub async fn new(config: ClientConfig) -> #name {
+                let (stream,_)= connect_async(config.addr).await.unwrap();
+
+                Self {
+                    stream,
+                    ping_interval: config.ping_interval,
+                    poll_state: PollState::Ready,
+                    outgoing_buffer: VecDeque::default(),
+                }
+            }
+
+            pub fn send_msg(&mut self, msg: #client_enum_name)
+            {
+                self.outgoing_buffer.push_back(msg);
+            }
+        }
+
+        impl #client_generics Stream for #name #client_generics {
+            type Item = #server_enum_name;
+
+            fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+                // deal with incomming msg
+                if let Poll::Ready(Some(Ok(data))) = self.stream.poll_next_unpin(cx)
+                {
+                    match data {
+                        tokio_tungstenite::tungstenite::Message::Text(msg) => {
+                            return Poll::Ready(Some(serde_json::from_str(&msg).unwrap()))
+                        }
+                        _ => {
+                        }
+                    }
+                }
+
+                // progress sink
+                match self.poll_state
+                {
+                    PollState::Ready =>
+                    {
+                        if let Poll::Ready(Ok(_)) = self.stream.poll_ready_unpin(cx)
+                        {
+                            self.poll_state = PollState::Send;
+                        }
+                    }
+                    PollState::Send =>
+                    {
+                        while let Some(msg) = self.outgoing_buffer.pop_front()
+                        {
+                            let _ = self.stream.start_send_unpin(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&msg).unwrap()));
+                        }
+                        self.poll_state = PollState::Flush;
+                    }
+                    PollState::Flush =>
+                    {
+                        if let Poll::Ready(Ok(_)) = self.stream.poll_flush_unpin(cx)
+                        {
+                            self.poll_state = PollState::Ready;
+                        }
+                    }
+                }
+
+                Poll::Pending
+            }
+        }
 
         #[derive(Debug, Clone, Serialize, Deserialize)]
         #custom
