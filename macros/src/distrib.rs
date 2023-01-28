@@ -75,13 +75,14 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
     let server_enum_name = &server_enum.ident;
     let client_enum_name = &client_enum.ident;
 
-    // let removed_personal_attr = remove_attr(&parsed_attrs, "server".to_string());
-    // let mut custom = server_enum.clone();
-    // custom.attrs.clear();
+    let remove_attr = remove_attr(&parsed_attrs, "server".to_string());
+    let mut custom = server_enum.clone();
+    custom.attrs.clear();
 
     quote! {
         type PendingFuture = Pin<Box<dyn Future<Output = Result<WebSocketStream<TcpStream>, Error>>>>;
 
+        #[pin_project::pin_project]
         pub struct #name #server_generics {
             listener: TcpListener,
             waiting_pings: HashMap<u64, SystemTime>,
@@ -114,23 +115,23 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
 
             fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
                 // accept incomming connections
-                if let Poll::Ready(Ok((socket,_))) = self.listener.poll_accept(cx) {
+                let this = self.project();
+                if let Poll::Ready(Ok((socket,_))) = this.listener.poll_accept(cx) {
                     let socket_fut = Box::pin(accept_async(socket));
-                    self.pending_conns.push(socket_fut);
+                    this.pending_conns.push(socket_fut);
                 }
 
                 // insert pending resolved connectios and
-                if let Poll::Ready(Some(Ok(new_socket))) = self.pending_conns.poll_next_unpin(cx) {
-                    let id = self.ids;
-                    self.ids += 1;
-
-                    self.connections.insert(id, (PollState::Ready, new_socket));
+                if let Poll::Ready(Some(Ok(new_socket))) = this.pending_conns.poll_next_unpin(cx) {
+                    let id = *this.ids;
+                    this.connections.insert(id, (PollState::Ready, new_socket));
+                    *this.ids += 1;
                 }
                 // poll all for incoming msg
 
                 let mut new_req = Vec::new();
                 let mut remove = Vec::new();
-                for (id, (_, socket)) in self.connections.iter_mut()
+                for (id, (_, socket)) in this.connections.into_iter()
 
                 {
                     if let Poll::Ready(Some(Ok(data))) = socket.poll_next_unpin(cx)
@@ -145,7 +146,7 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
                             Message::Ping(_) =>
                             {
                                 // always auto send pongs
-                                self.waiting_pings.insert(id, SystemTime::now());
+                                this.waiting_pings.insert(*id, SystemTime::now());
                                 let _ = socket.send(Message::Pong(Vec::new()));
                             }
                             Message::Close(_) =>
@@ -159,16 +160,16 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
                 }
                 for id in remove
                 {
-                    self.connections.remove(&id);
+                    this.connections.remove(&id);
                 }
 
                 for req in new_req {
-                    self.incoming_buffer.push_back(req);
+                    this.incoming_buffer.push_back(req);
                 }
 
                 // progress sinks
 
-                for (id, (poll_state, socket)) in &mut self.connections
+                for (id, (poll_state, socket)) in this.connections.into_iter()
                 {
                     match poll_state
                     {
@@ -181,7 +182,7 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
                         }
                         PollState::Send =>
                         {
-                            while let Some(entry) = self.outgoing_buffers.get_mut(&id).and_then(|b| b.pop_front())
+                            while let Some(entry) = this.outgoing_buffers.get_mut(&id).and_then(|b| b.pop_front())
                             {
                                 let text = serde_json::to_string(&entry).unwrap();
                                 let _ = socket.start_send_unpin(Message::Text(text));
@@ -200,18 +201,18 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
 
                 // disconnect timeouts
                 let mut disconnect = Vec::new();
-                for (id, time) in &self.waiting_pings
+                for (id, time) in this.waiting_pings.into_iter()
                 {
-                    if SystemTime::now().duration_since(time).unwrap() > self.timeout{
-                        disconnect.push(*id);
-                    }
+                    // if SystemTime::now().duration_since(time.clone()).unwrap() > this.timeout{
+                    //     disconnect.push(*id);
+                    // }
                 }
 
                 for id in disconnect {
-                    let _ = self.connections.remove(&id).send(Message::Close(None));
+                    let _ = this.connections.remove(&id).unwrap().1.send(Message::Close(None));
                 }
 
-                if let Some(msg) = self.incoming_buffer.pop_front(){
+                if let Some(msg) = this.incoming_buffer.pop_front(){
                     return Poll::Ready(Some(msg))
                 }
                 else {
@@ -219,10 +220,8 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
                 }
             }
         }
-
-        // #(#removed_personal_attr)*
-        #server_enum
-        // #custom
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #custom
     }
 }
 pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStream
@@ -240,15 +239,14 @@ pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStre
     }
     let name = name.unwrap();
     let client_generics = &client_enum.generics;
-    // let removed_personal_attr = remove_attr(&parsed_attrs, "client".to_string());
-    // let mut custom = client_enum.clone();
-    // custom.attrs.clear();
+    let mut custom = client_enum.clone();
+    custom.attrs.clear();
     quote! {
 
         pub struct #name #client_generics { }
 
-        // #(#removed_personal_attr)*
-        #client_enum
+        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #custom
     }
 }
 
@@ -274,10 +272,6 @@ pub fn identify<'a>(token1: &'a ItemEnum, token2: &'a ItemEnum) -> (&'a ItemEnum
 
 pub(super) fn build(tokens: TokenStream) -> TokenStream
 {
-    // let ServerEnum { server_name, server_data } =
-    // syn::parse2(tokens.clone()).unwrap(); let ServerEnum { server_data }=
-    // syn::parse2(tokens).unwrap();
-
     let Data { server_data } = syn::parse2(tokens).unwrap();
     let token1 = &server_data[0];
     let token2 = &server_data[1];
@@ -301,6 +295,7 @@ pub(super) fn build(tokens: TokenStream) -> TokenStream
 
         #parsed_client
         #parsed_server
+
     }
 }
 
