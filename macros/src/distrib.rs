@@ -6,11 +6,15 @@ use syn::{
     Attribute, Ident, ItemEnum, Meta, MetaList, NestedMeta, Path,
 };
 
-pub fn get_name(parsed_attrs: &Vec<Meta>, side: String) -> Ident
+pub fn get_name(parsed_attrs: &Vec<Meta>, side: String) -> Option<Ident>
 {
     let mut name: Option<Ident> = None;
     for meta in parsed_attrs
     {
+        if meta.path().get_ident().is_none()
+        {
+            continue
+        }
         if meta.path().get_ident().unwrap().to_string() == side
         {
             match meta
@@ -38,13 +42,14 @@ pub fn get_name(parsed_attrs: &Vec<Meta>, side: String) -> Ident
         panic!("couldn't find name");
     }
 
-    name.unwrap()
+    name
 }
 
 pub fn remove_attr(parsed_attrs: &Vec<Meta>, attr_path: String) -> Vec<&Meta>
 {
     parsed_attrs
         .into_iter()
+        .filter(|m| m.path().get_ident().is_some())
         .filter(|m| m.path().get_ident().unwrap().to_string() != attr_path)
         .collect()
 }
@@ -54,10 +59,15 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
     let parsed_attrs: Vec<Meta> = server_enum
         .attrs
         .iter()
-        .map(|a| a.parse_meta().unwrap())
+        .filter_map(|a| a.parse_meta().ok())
         .collect();
 
     let name = get_name(&parsed_attrs, "server".to_string());
+    if name.is_none()
+    {
+        panic!("failed to parse name");
+    }
+    let name = name.unwrap();
     //
     // todo asset that the generics are the same
     let server_generics = &server_enum.generics;
@@ -65,9 +75,9 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
     let server_enum_name = &server_enum.ident;
     let client_enum_name = &client_enum.ident;
 
-    let removed_personal_attr = remove_attr(&parsed_attrs, "server".to_string());
-    let mut custom = server_enum.clone();
-    custom.attrs.clear();
+    // let removed_personal_attr = remove_attr(&parsed_attrs, "server".to_string());
+    // let mut custom = server_enum.clone();
+    // custom.attrs.clear();
 
     quote! {
         type PendingFuture = Pin<Box<dyn Future<Output = Result<WebSocketStream<TcpStream>, Error>>>>;
@@ -111,8 +121,8 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
 
                 // insert pending resolved connectios and
                 if let Poll::Ready(Some(Ok(new_socket))) = self.pending_conns.poll_next_unpin(cx) {
-                    let id = self.id;
-                    self.id += 1;
+                    let id = self.ids;
+                    self.ids += 1;
 
                     self.connections.insert(id, (PollState::Ready, new_socket));
                 }
@@ -135,7 +145,7 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
                             Message::Ping(_) =>
                             {
                                 // always auto send pongs
-                                self.waiting_pings.insert(id, SystemTime::now);
+                                self.waiting_pings.insert(id, SystemTime::now());
                                 let _ = socket.send(Message::Pong(Vec::new()));
                             }
                             Message::Close(_) =>
@@ -153,7 +163,7 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
                 }
 
                 for req in new_req {
-                    self.incoming_buffer.push(req);
+                    self.incoming_buffer.push_back(req);
                 }
 
                 // progress sinks
@@ -192,17 +202,17 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
                 let mut disconnect = Vec::new();
                 for (id, time) in &self.waiting_pings
                 {
-                    if SystemTime::now().duration_since(time) > self.timeout{
-                        disconnect.push(id);
+                    if SystemTime::now().duration_since(time).unwrap() > self.timeout{
+                        disconnect.push(*id);
                     }
                 }
 
                 for id in disconnect {
-                    let _ = self.connections.remove(id).send(Message::Close(None));
+                    let _ = self.connections.remove(&id).send(Message::Close(None));
                 }
 
                 if let Some(msg) = self.incoming_buffer.pop_front(){
-                    return Poll::Ready(msg)
+                    return Poll::Ready(Some(msg))
                 }
                 else {
                     Poll::Pending
@@ -210,8 +220,9 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
             }
         }
 
-        #(#removed_personal_attr)*
-        #custom
+        // #(#removed_personal_attr)*
+        #server_enum
+        // #custom
     }
 }
 pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStream
@@ -219,20 +230,25 @@ pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStre
     let parsed_attrs: Vec<Meta> = client_enum
         .attrs
         .iter()
-        .map(|a| a.parse_meta().unwrap())
+        .filter_map(|a| a.parse_meta().ok())
         .collect();
 
     let name = get_name(&parsed_attrs, "client".to_string());
+    if name.is_none()
+    {
+        panic!("failed to parse name");
+    }
+    let name = name.unwrap();
     let client_generics = &client_enum.generics;
-    let removed_personal_attr = remove_attr(&parsed_attrs, "client".to_string());
-    let mut custom = client_enum.clone();
-    custom.attrs.clear();
+    // let removed_personal_attr = remove_attr(&parsed_attrs, "client".to_string());
+    // let mut custom = client_enum.clone();
+    // custom.attrs.clear();
     quote! {
 
         pub struct #name #client_generics { }
 
-        #(#removed_personal_attr)*
-        #custom
+        // #(#removed_personal_attr)*
+        #client_enum
     }
 }
 
@@ -277,7 +293,7 @@ pub(super) fn build(tokens: TokenStream) -> TokenStream
         use tokio::net::{TcpListener, TcpStream};
         use tokio_tungstenite::{
             accept_async,
-            tungstenite::{handshake::server::NoCallback, protocol::WebSocketConfig, Message},
+            tungstenite::{handshake::server::NoCallback, protocol::WebSocketConfig, Message, error::Error},
             WebSocketStream
         };
         use std::collections::HashMap;
