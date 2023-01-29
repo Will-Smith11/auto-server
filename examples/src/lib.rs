@@ -16,7 +16,7 @@ use std::pin::Pin;
 
 use futures::{SinkExt, StreamExt};
 
-macros::client! {
+auto_server_macros::client! {
     #[server(MemesServer)]
     pub enum MemesMessage{
         Field1(String),
