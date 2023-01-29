@@ -27,7 +27,19 @@ use proc_macro::TokenStream;
 /// currently we don't have any formal verification system inplace, however
 /// it might be added in the future.
 #[proc_macro]
-pub fn serverize(input: TokenStream) -> TokenStream
+pub fn client_server(input: TokenStream) -> TokenStream
 {
-    distrib::build(input.into()).into()
+    distrib::build(input.into(), distrib::GenOps::Both).into()
+}
+
+#[proc_macro]
+pub fn server(input: TokenStream) -> TokenStream
+{
+    distrib::build(input.into(), distrib::GenOps::Server).into()
+}
+
+#[proc_macro]
+pub fn client(input: TokenStream) -> TokenStream
+{
+    distrib::build(input.into(), distrib::GenOps::Client).into()
 }

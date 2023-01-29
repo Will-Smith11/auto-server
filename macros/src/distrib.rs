@@ -84,30 +84,32 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
 
     quote! {
 
-        type PendingFuture = Pin<Box<dyn Future<Output = Result<WebSocketStream<TcpStream>, Error>>>>;
+        type PendingFuture = Pin<Box<dyn std::future::Future<Output = Result<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, tokio_tungstenite::tungstenite::Error>>>>;
 
         #[pin_project::pin_project]
         pub struct #name #server_generics {
-            listener: TcpListener,
-            waiting_pings: HashMap<u64, SystemTime>,
-            pending_conns: FuturesUnordered<PendingFuture>,
-            connections: HashMap<u64, (PollState, WebSocketStream<TcpStream>)>,
-            outgoing_buffers: HashMap<u64, VecDeque<#server_enum_name>>,
-            incoming_buffer: VecDeque<(u64, #client_enum_name)>,
+            #[pin]
+            listener: tokio::net::TcpListener,
+            waiting_pings: std::collections::HashMap<u64, std::time::SystemTime>,
+            #[pin]
+            pending_conns: futures::stream::FuturesUnordered<PendingFuture>,
+            connections: std::collections::HashMap<u64, (common::PollState, tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>)>,
+            outgoing_buffers: std::collections::HashMap<u64, std::collections::VecDeque<#server_enum_name>>,
+            incoming_buffer: std::collections::VecDeque<(u64, #client_enum_name)>,
             ids: u64,
-            timeout: Duration
+            timeout: std::time::Duration,
         }
         // should only be server gen ident after struct name
         impl #server_generics #name #server_generics {
-            pub fn new(server_config: ServerConfig) -> Self {
+            pub fn new(server_config: common::server_config::ServerConfig) -> Self {
                 Self {
                     listener: server_config.listener,
                     timeout: server_config.timeout,
-                    waiting_pings: HashMap::new(),
-                    connections: HashMap::new(),
-                    outgoing_buffers: HashMap::new(),
-                    pending_conns: FuturesUnordered::default(),
-                    incoming_buffer: VecDeque::new(),
+                    waiting_pings: std::collections::HashMap::new(),
+                    connections: std::collections::HashMap::new(),
+                    outgoing_buffers: std::collections::HashMap::new(),
+                    pending_conns: futures::stream::FuturesUnordered::default(),
+                    incoming_buffer: std::collections::VecDeque::new(),
                     ids: 0,
                 }
             }
@@ -119,21 +121,21 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
         }
 
         // should only be server gen ident after struct name
-        impl #server_generics Stream for #name  #server_generics {
+        impl #server_generics futures::stream::Stream for #name  #server_generics {
             type Item = (u64, #client_enum_name);
 
-            fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
                 // accept incomming connections
                 let this = self.project();
-                if let Poll::Ready(Ok((socket,_))) = this.listener.poll_accept(cx) {
-                    let socket_fut = Box::pin(accept_async(socket));
+                if let std::task::Poll::Ready(Ok((socket,_))) = this.listener.poll_accept(cx) {
+                    let socket_fut = Box::pin(tokio_tungstenite::accept_async(socket));
                     this.pending_conns.push(socket_fut);
                 }
 
                 // insert pending resolved connectios and
-                if let Poll::Ready(Some(Ok(new_socket))) = this.pending_conns.poll_next_unpin(cx) {
+                if let std::task::Poll::Ready(Some(Ok(new_socket))) = this.pending_conns.poll_next(cx) {
                     let id = *this.ids;
-                    this.connections.insert(id, (PollState::Ready, new_socket));
+                    this.connections.insert(id, (common::PollState::Ready, new_socket));
                     *this.ids += 1;
                 }
                 // poll all for incoming msg
@@ -143,22 +145,22 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
                 for (id, (_, socket)) in this.connections.into_iter()
 
                 {
-                    if let Poll::Ready(Some(Ok(data))) = socket.poll_next_unpin(cx)
+                    if let std::task::Poll::Ready(Some(Ok(data))) = socket.poll_next_unpin(cx)
                     {
                         match data
                         {
-                            Message::Text(text) =>
+                            tokio_tungstenite::tungstenite::Message::Text(text) =>
                             {
                                 let msg: #client_enum_name = serde_json::from_str(&text).unwrap();
                                 new_req.push((*id, msg));
                             }
-                            Message::Ping(_) =>
+                            tokio_tungstenite::tungstenite::Message::Ping(_) =>
                             {
                                 // always auto send pongs
-                                this.waiting_pings.insert(*id, SystemTime::now());
-                                let _ = socket.send(Message::Pong(Vec::new()));
+                                this.waiting_pings.insert(*id, std::time::SystemTime::now());
+                                let _ = socket.send(tokio_tungstenite::tungstenite::Message::Pong(Vec::new()));
                             }
-                            Message::Close(_) =>
+                            tokio_tungstenite::tungstenite::Message::Close(_) =>
                             {
                                 remove.push(*id);
                             }
@@ -182,27 +184,27 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
                 {
                     match poll_state
                     {
-                        PollState::Ready =>
+                        common::PollState::Ready =>
                         {
-                            if let Poll::Ready(Ok(_)) = socket.poll_ready_unpin(cx)
+                            if let std::task::Poll::Ready(Ok(_)) = socket.poll_ready_unpin(cx)
                             {
-                                *poll_state = PollState::Send;
+                                *poll_state = common::PollState::Send;
                             }
                         }
-                        PollState::Send =>
+                        common::PollState::Send =>
                         {
                             while let Some(entry) = this.outgoing_buffers.get_mut(&id).and_then(|b| b.pop_front())
                             {
                                 let text = serde_json::to_string(&entry).unwrap();
-                                let _ = socket.start_send_unpin(Message::Text(text));
+                                let _ = socket.start_send_unpin(tokio_tungstenite::tungstenite::Message::Text(text));
                             }
-                            *poll_state = PollState::Flush;
+                            *poll_state = common::PollState::Flush;
                         }
-                        PollState::Flush =>
+                        common::PollState::Flush =>
                         {
-                            if let Poll::Ready(Ok(_)) = socket.poll_flush_unpin(cx)
+                            if let std::task::Poll::Ready(Ok(_)) = socket.poll_flush_unpin(cx)
                             {
-                                *poll_state = PollState::Ready;
+                                *poll_state = common::PollState::Ready;
                             }
                         }
                     }
@@ -212,24 +214,24 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
                 let mut disconnect = Vec::new();
                 for (id, time) in this.waiting_pings.into_iter()
                 {
-                    // if SystemTime::now().duration_since(time.clone()).unwrap() > this.timeout{
-                    //     disconnect.push(*id);
-                    // }
+                    if std::time::SystemTime::now().duration_since(time.clone()).unwrap().gt(this.timeout){
+                        disconnect.push(*id);
+                    }
                 }
 
                 for id in disconnect {
-                    let _ = this.connections.remove(&id).unwrap().1.send(Message::Close(None));
+                    let _ = this.connections.remove(&id).unwrap().1.send(tokio_tungstenite::tungstenite::Message::Close(None));
                 }
 
                 if let Some(msg) = this.incoming_buffer.pop_front(){
-                    return Poll::Ready(Some(msg))
+                    return std::task::Poll::Ready(Some(msg))
                 }
                 else {
-                    Poll::Pending
+                    std::task::Poll::Pending
                 }
             }
         }
-        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
         #custom
     }
 }
@@ -257,21 +259,21 @@ pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStre
 
         pub struct #name #client_generics {
 
-            stream:          WebSocketStream<MaybeTlsStream<TcpStream>>,
-            ping_interval:   Interval,
-            poll_state: PollState,
-            outgoing_buffer: VecDeque<#client_enum_name>,
+            stream:          tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+            ping_interval:   tokio::time::Interval,
+            poll_state: common::PollState,
+            outgoing_buffer: std::collections::VecDeque<#client_enum_name>,
         }
 
         impl #client_generics #name #client_generics {
-            pub async fn new(config: ClientConfig) -> #name {
-                let (stream,_)= connect_async(config.addr).await.unwrap();
+            pub async fn new(config: common::client_config::ClientConfig) -> #name {
+                let (stream,_)= tokio_tungstenite::connect_async(config.addr).await.unwrap();
 
                 Self {
                     stream,
                     ping_interval: config.ping_interval,
-                    poll_state: PollState::Ready,
-                    outgoing_buffer: VecDeque::default(),
+                    poll_state: common::PollState::Ready,
+                    outgoing_buffer: std::collections::VecDeque::default(),
                 }
             }
 
@@ -281,16 +283,16 @@ pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStre
             }
         }
 
-        impl #client_generics Stream for #name #client_generics {
+        impl #client_generics futures::Stream for #name #client_generics {
             type Item = #server_enum_name;
 
-            fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
                 // deal with incomming msg
-                if let Poll::Ready(Some(Ok(data))) = self.stream.poll_next_unpin(cx)
+                if let std::task::Poll::Ready(Some(Ok(data))) = self.stream.poll_next_unpin(cx)
                 {
                     match data {
                         tokio_tungstenite::tungstenite::Message::Text(msg) => {
-                            return Poll::Ready(Some(serde_json::from_str(&msg).unwrap()))
+                            return std::task::Poll::Ready(Some(serde_json::from_str(&msg).unwrap()))
                         }
                         _ => {
                         }
@@ -300,35 +302,35 @@ pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStre
                 // progress sink
                 match self.poll_state
                 {
-                    PollState::Ready =>
+                    common::PollState::Ready =>
                     {
-                        if let Poll::Ready(Ok(_)) = self.stream.poll_ready_unpin(cx)
+                        if let std::task::Poll::Ready(Ok(_)) = self.stream.poll_ready_unpin(cx)
                         {
-                            self.poll_state = PollState::Send;
+                            self.poll_state = common::PollState::Send;
                         }
                     }
-                    PollState::Send =>
+                    common::PollState::Send =>
                     {
                         while let Some(msg) = self.outgoing_buffer.pop_front()
                         {
                             let _ = self.stream.start_send_unpin(tokio_tungstenite::tungstenite::Message::Text(serde_json::to_string(&msg).unwrap()));
                         }
-                        self.poll_state = PollState::Flush;
+                        self.poll_state = common::PollState::Flush;
                     }
-                    PollState::Flush =>
+                    common::PollState::Flush =>
                     {
-                        if let Poll::Ready(Ok(_)) = self.stream.poll_flush_unpin(cx)
+                        if let std::task::Poll::Ready(Ok(_)) = self.stream.poll_flush_unpin(cx)
                         {
-                            self.poll_state = PollState::Ready;
+                            self.poll_state = common::PollState::Ready;
                         }
                     }
                 }
 
-                Poll::Pending
+                std::task::Poll::Pending
             }
         }
 
-        #[derive(Debug, Clone, Serialize, Deserialize)]
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
         #custom
     }
 }
@@ -353,7 +355,14 @@ pub fn identify<'a>(token1: &'a ItemEnum, token2: &'a ItemEnum) -> (&'a ItemEnum
     }
 }
 
-pub(super) fn build(tokens: TokenStream) -> TokenStream
+pub enum GenOps
+{
+    Both,
+    Client,
+    Server,
+}
+
+pub(super) fn build(tokens: TokenStream, opts: GenOps) -> TokenStream
 {
     let Data { server_data } = syn::parse2(tokens).unwrap();
     let token1 = &server_data[0];
@@ -361,24 +370,42 @@ pub(super) fn build(tokens: TokenStream) -> TokenStream
 
     let (client, server) = identify(token1, token2);
 
-    let parsed_server = parse_server(server, client);
-    let parsed_client = parse_client(client, server);
+    let stream = match opts
+    {
+        GenOps::Both =>
+        {
+            let gen_server = parse_server(server, client);
+            let gen_client = parse_client(client, server);
+            vec![gen_server, gen_client]
+        }
+        GenOps::Client =>
+        {
+            let mut custom = server.clone();
+            custom.attrs.clear();
+
+            let c_server = quote! {
+            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            #custom
+                };
+
+            vec![parse_client(client, server), c_server]
+        }
+        GenOps::Server =>
+        {
+            let mut custom = client.clone();
+            custom.attrs.clear();
+
+            let c_client = quote! {
+            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            #custom
+                };
+
+            vec![parse_server(server, client), c_client]
+        }
+    };
 
     quote! {
-        use std::task::{Poll, Context};
-        use tokio::time::Duration;
-        use tokio::net::{TcpListener, TcpStream};
-        use tokio_tungstenite::{
-            accept_async,
-            tungstenite::{handshake::server::NoCallback, protocol::WebSocketConfig, Message, error::Error},
-            WebSocketStream
-        };
-        use std::collections::HashMap;
-        use std::time::SystemTime;
-
-        #parsed_client
-        #parsed_server
-
+        #(#stream)*
     }
 }
 
