@@ -258,7 +258,6 @@ pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStre
     quote! {
 
         pub struct #name #client_generics {
-
             stream:          tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
             ping_interval:   tokio::time::Interval,
             poll_state: common::PollState,
