@@ -115,8 +115,8 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
             }
 
             pub fn send_all(&mut self, msg: #server_enum_name) {
-                for (_, (_, conn)) in self.connections.iter_mut() {
-                    let mut buffer = self.outgoing_buffers.entry(conn.id()).or_default();
+                for (id, (_, conn)) in self.connections.iter_mut() {
+                    let mut buffer = self.outgoing_buffers.entry(id).or_default();
                     buffer.push_back(msg.clone());
                 }
             }
