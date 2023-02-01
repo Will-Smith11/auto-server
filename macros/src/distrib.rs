@@ -84,7 +84,7 @@ pub fn parse_server(server_enum: &ItemEnum, client_enum: &ItemEnum) -> TokenStre
 
     quote! {
 
-        type PendingFuture = Pin<Box<dyn std::future::Future<Output = Result<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, tokio_tungstenite::tungstenite::Error>>>>;
+        type PendingFuture = Pin<Box<dyn std::future::Future<Output = Result<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>, tokio_tungstenite::tungstenite::Error>> + Send>>;
 
         #[pin_project::pin_project]
         pub struct #name #server_generics {
