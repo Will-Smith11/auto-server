@@ -333,6 +333,7 @@ pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStre
                     }
                 }
 
+                cx.waker().wake_by_ref();
                 std::task::Poll::Pending
             }
         }
