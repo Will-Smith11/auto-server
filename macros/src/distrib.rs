@@ -273,8 +273,21 @@ pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStre
         }
 
         impl #client_generics #name #client_generics {
-            pub async fn new(config: auto_server_common::client_config::ClientConfig) -> #name {
-                let (stream,_)= tokio_tungstenite::connect_async(config.addr).await.unwrap();
+            pub async fn new(config: auto_server_common::client_config::ClientConfig, retry: bool) -> #name {
+
+                let (stream,_)= if retry {
+                    loop {
+
+                        if let Ok(res) = tokio_tungstenite::connect_async(config.addr).await {
+                            break res;
+                        }
+                        else {
+                            tokio::time::sleep(std::time::Duration::from_secs(5));
+                        }
+                    }
+                }else {
+                    tokio_tungstenite::connect_async(config.addr).await.unwrap()
+                };
 
                 Self {
                     stream,
