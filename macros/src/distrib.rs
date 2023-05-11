@@ -282,7 +282,7 @@ pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStre
                             break res;
                         }
                         else {
-                            tokio::time::sleep(std::time::Duration::from_secs(5));
+                            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                         }
                     }
                 }else {
