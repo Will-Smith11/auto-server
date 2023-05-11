@@ -278,7 +278,7 @@ pub fn parse_client(client_enum: &ItemEnum, server_enum: &ItemEnum) -> TokenStre
                 let (stream,_)= if retry {
                     loop {
 
-                        if let Ok(res) = tokio_tungstenite::connect_async(config.addr).await {
+                        if let Ok(res) = tokio_tungstenite::connect_async(config.addr.clone()).await {
                             break res;
                         }
                         else {
